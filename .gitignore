@@ -1,0 +1,6 @@
+build/
+*.exe
+runs/
+ledger.csv
+shakedown.ini
+*.bin
