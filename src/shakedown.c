@@ -297,11 +297,10 @@ static int helperMain(void) {
     return 0;
 }
 
+// Asked through schtasks: the task registry is not readable without admin rights.
 static BOOL taskExists(void) {
-    HKEY key;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Schedule\\TaskCache\\Tree\\" TASK_NAME, 0, KEY_READ, &key) != ERROR_SUCCESS) return FALSE;
-    RegCloseKey(key);
-    return TRUE;
+    WCHAR cmd[96] = L"schtasks.exe /Query /TN " TASK_NAME;
+    return runHidden(cmd, 10000) == 0;
 }
 
 // Windows' own counters, for when there is no admin path: the clock of each logical CPU, nothing else.
