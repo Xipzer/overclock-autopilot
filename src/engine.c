@@ -1,5 +1,5 @@
 // Shakedown: runs a real all-core load and says which CPU cores failed, when, and how hot they were.
-// One console program, no installer, nothing resident. See README.md.
+// This file is the engine, included by window.c (shakedown.exe) and cli.c (shakedown-cli.exe). See README.md.
 //
 // Parts: topology (which logical CPUs belong to which core), sensors (per-core clock, temperature, throttling),
 // the Windows hardware error log (WHEA) matched to cores, the load runner, and the verdict.
@@ -18,8 +18,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
+#include <stdarg.h>
 
-#define VERSION    "0.1.0"
+#define VERSION    "0.2.0"
 #define MAX_CPU    64
 #define MAX_WHEA   1024
 #define TASK_NAME  L"Shakedown"
@@ -31,6 +32,36 @@
 #define F_POWER    0x0400
 #define F_CURRENT  0x1000
 #define F_ANY      (F_THERMAL | F_PROCHOT | F_POWER | F_CURRENT)
+
+// What the window shows while a run is going (and between runs). Filled by the engine every sample.
+enum { PH_IDLE, PH_BEFORE, PH_START, PH_LOAD, PH_AFTER };
+typedef struct { int mhz, temp, util, flags, errors, firstError; } LiveCore;
+typedef struct {
+    int phase, loadSeconds, wanted, busy, pkgWatts, pkgTemp, tjmax, errors, round;
+    double coolant;
+    ULONG64 held;
+    LiveCore core[64];
+} Live;
+static void (*onLive)(const Live *); // set by the window
+static BOOL quiet;                   // no output to stdout (the window has none)
+static char engineError[200];        // why the last command could not start
+
+static void fail(const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    vsnprintf(engineError, sizeof(engineError), format, args);
+    va_end(args);
+    if (!quiet) fprintf(stderr, "%s\n", engineError);
+}
+
+static void say(const char *format, ...) {
+    va_list args;
+    if (quiet) return;
+    va_start(args, format);
+    vprintf(format, args);
+    va_end(args);
+    fflush(stdout);
+}
 
 // ---- Topology ----
 
@@ -460,7 +491,7 @@ static void wheaPoll(ULONG64 since) {
 // ---- One run ----
 
 typedef struct {
-    int minutes, soak, maxRuns;
+    int minutes, soak, maxRuns, round;
     ULONG64 exclude;
     char label[48], note[160];
 } Options;
@@ -533,8 +564,7 @@ static void clock8(char *out) {
 }
 
 static void both(FILE *f, const char *line) {
-    fputs(line, stdout);
-    fflush(stdout);
+    if (!quiet) fputs(line, stdout), fflush(stdout);
     if (f) fputs(line, f), fflush(f);
 }
 
@@ -568,7 +598,7 @@ static BOOL runOnce(const Options *o, Result *r, char *name) {
     setting(L"load", L"crashfile", L"", crash, MAX_PATH);
     setting(L"load", L"score", L"", prefix, 64);
     if (!raw[0]) {
-        fprintf(stderr, "No load is set. Put the program to run in shakedown.ini under [load] command=.\n");
+        fail("No load is set. Put the program to run in shakedown.ini under [load] command=.");
         return FALSE;
     }
     swprintf(seconds, 16, L"%d", o->minutes ? o->minutes * 60 : 1);
@@ -594,15 +624,15 @@ static BOOL runOnce(const Options *o, Result *r, char *name) {
     if (o->soak > 0) {
         double c = coolantRead();
         if (c < 0) {
-            fprintf(stderr, "--soak needs a water temperature (see [coolant] in shakedown.ini).\n");
+            fail("--soak needs a water temperature (see [coolant] in shakedown.ini).");
             return FALSE;
         }
         for (int waited = 0; c < o->soak && waited < 3600 && !stopRequested; waited += 5, c = coolantRead()) {
-            if (waited % 60 == 0) printf("# soak: water %.1f C, waiting for %d C\n", c, o->soak), fflush(stdout);
+            if (waited % 60 == 0) say("# soak: water %.1f C, waiting for %d C\n", c, o->soak);
             Sleep(5000);
         }
         if (c < o->soak) {
-            fprintf(stderr, "Water did not reach %d C (now %.1f C). Not started.\n", o->soak, c);
+            fail("Water did not reach %d C (now %.1f C). Not started.", o->soak, c);
             return FALSE;
         }
     }
@@ -651,7 +681,7 @@ static BOOL runOnce(const Options *o, Result *r, char *name) {
             SetHandleInformation(GetStdHandle(STD_ERROR_HANDLE), HANDLE_FLAG_INHERIT, 0);
             SetHandleInformation(GetStdHandle(STD_INPUT_HANDLE), HANDLE_FLAG_INHERIT, 0);
             if (!CreateProcessW(NULL, command, NULL, NULL, TRUE, CREATE_NEW_PROCESS_GROUP | CREATE_SUSPENDED, NULL, dir[0] ? dir : NULL, &si, &pi)) {
-                fprintf(stderr, "Could not start the load (error %lu): %ls\n", GetLastError(), command);
+                fail("Could not start the load (error %lu): %ls", GetLastError(), command);
                 return FALSE;
             }
             jobLimit.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | (o->exclude ? JOB_OBJECT_LIMIT_AFFINITY : 0);
@@ -705,6 +735,38 @@ static BOOL runOnce(const Options *o, Result *r, char *name) {
         }
         snprintf(line + n, sizeof(line) - n, "\n");
         both(csv, line);
+        if (onLive) {
+            static Live live;
+            memset(&live, 0, sizeof(live));
+            live.phase = !begun ? PH_BEFORE : running ? (loaded ? PH_LOAD : PH_START) : PH_AFTER;
+            live.loadSeconds = !begun ? 0 : running ? (int)((GetTickCount() - (DWORD)loadTick) / 1000) : r->seconds;
+            live.wanted = r->wanted, live.busy = busy, live.pkgWatts = s.pkgWatts, live.pkgTemp = s.pkgTemp, live.tjmax = s.tjmax;
+            live.coolant = coolant, live.held = o->exclude, live.round = o->round;
+            for (int i = 0; i < coreCount; i++) {
+                LiveCore *lc = &live.core[i];
+                lc->temp = -1, lc->firstError = -1;
+                for (int cpu = 0; cpu < cpuCount; cpu++) {
+                    if (!(cores[i].mask >> cpu & 1)) continue;
+                    if (s.cpu[cpu].mhz > lc->mhz && (s.cpu[cpu].c0 < 0 || s.cpu[cpu].c0 >= 200)) lc->mhz = s.cpu[cpu].mhz;
+                    if (s.cpu[cpu].temp > lc->temp) lc->temp = s.cpu[cpu].temp;
+                    lc->flags |= s.cpu[cpu].flags;
+                    lc->util += util[cpu];
+                }
+                int threads = 0;
+                for (ULONG64 m = cores[i].mask; m; m &= m - 1) threads++;
+                lc->util = threads ? lc->util / threads : 0;
+            }
+            for (int i = 0; i < wheaCount && begun; i++) {
+                if (whea[i].time + 10000000 < loadStarted) continue;
+                live.errors++;
+                if (whea[i].core < 0) continue;
+                LiveCore *lc = &live.core[whea[i].core];
+                int at = whea[i].time > loadStarted ? (int)((whea[i].time - loadStarted) / 10000000) : 0;
+                if (lc->firstError < 0 || at < lc->firstError) lc->firstError = at;
+                lc->errors++;
+            }
+            onLive(&live);
+        }
 
         if (running && limit > 0 && coolant >= limit) {
             TerminateJobObject(job, 1), TerminateProcess(pi.hProcess, 1);
@@ -764,7 +826,7 @@ static BOOL runOnce(const Options *o, Result *r, char *name) {
 
     swprintf(path, MAX_PATH, L"%lsruns\\%hs.txt", exeDir, name);
     FILE *report = _wfopen(path, L"w");
-    verdict(o, r, name, stdout);
+    if (!quiet) verdict(o, r, name, stdout);
     if (report) verdict(o, r, name, report), fclose(report);
 
     swprintf(path, MAX_PATH, L"%lsledger.csv", exeDir);
@@ -845,117 +907,34 @@ static void verdict(const Options *o, const Result *r, const char *name, FILE *o
     fflush(out);
 }
 
-// ---- Commands ----
+// ---- Ranking ----
 
-static int cmdRank(Options *o) {
-    Result r;
-    char name[96], list[256], history[1024] = "";
+// Runs the load again and again, each time also holding out the cores the error log named, until it passes.
+// history gets one line per run. Returns 0 when the last run passed.
+static int rankLoop(Options *o, Result *r, char *name, char *history, int cap) {
+    char list[256], failed[256];
     int max = o->maxRuns ? o->maxRuns : 6;
+    history[0] = 0;
     for (int run = 1; run <= max && !stopRequested; run++) {
         coreList(o->exclude, list);
-        printf("# rank: run %d of at most %d, held out: %s\n", run, max, list);
+        say("# rank: run %d of at most %d, held out: %s\n", run, max, list);
         snprintf(o->label, sizeof(o->label), "rank%d", run);
+        o->round = run;
         wheaCount = 0;
-        if (!runOnce(o, &r, name)) return 2;
-        ULONG64 fresh = r.failed & ~o->exclude;
-        char failed[256];
+        if (!runOnce(o, r, name)) return 2;
+        ULONG64 fresh = r->failed & ~o->exclude;
         coreList(fresh, failed);
-        snprintf(history + strlen(history), sizeof(history) - strlen(history), "#   run %d: held out %-18s %s after %d:%02d, failing: %s\n", run, list, r.pass ? "passed" : "failed", r.seconds / 60,
-                 r.seconds % 60, failed);
-        if (r.pass) {
-            printf("\n# Ranking (weakest first is the order the cores were held out):\n%s# With %s held out the load passes.\n", history, list);
-            return 0;
-        }
-        if (!fresh) {
-            printf("\n# Ranking so far:\n%s# The last run failed without naming a new core, so the list stops here.\n", history);
-            return 1;
-        }
+        snprintf(history + strlen(history), cap - strlen(history), "Run %d, held out %s: %s after %d:%02d%s%s\n", run, list, r->pass ? "passed" : "failed", r->seconds / 60, r->seconds % 60,
+                 fresh ? ", errors on " : "", fresh ? failed : "");
+        if (r->pass) return 0;
+        if (!fresh || stopRequested) return 1;
         o->exclude |= fresh;
-        Sleep(20000);
+        for (int wait = 0; wait < 40 && !stopRequested; wait++) Sleep(500);
     }
-    printf("\n# Ranking so far:\n%s# Stopped after %d runs.\n", history, max);
     return 1;
 }
 
-static int cmdSensors(void) {
-    Snapshot s;
-    int util[MAX_CPU] = {0};
-    utilRead(util);
-    sensorsRead(&s);
-    Sleep(1500);
-    utilRead(util);
-    sensorsRead(&s);
-    double water = coolantRead();
-    printf("Sensors: %s\n", sourceName[source]);
-    if (s.pkgTemp >= 0) printf("Package: %d C, %d W, limit %d C\n", s.pkgTemp, s.pkgWatts, s.tjmax);
-    if (water >= 0) printf("Water: %.1f C\n", water);
-    printf("\nCore   CPUs     APIC   MHz    Temp   Busy\n");
-    for (int i = 0; i < coreCount; i++) {
-        int mhz = 0, temp = -1, u = 0, threads = 0, first = -1, last = -1;
-        for (int cpu = 0; cpu < cpuCount; cpu++) {
-            if (!(cores[i].mask >> cpu & 1)) continue;
-            if (first < 0) first = cpu;
-            last = cpu;
-            if (s.cpu[cpu].mhz > mhz) mhz = s.cpu[cpu].mhz;
-            if (s.cpu[cpu].temp > temp) temp = s.cpu[cpu].temp;
-            u += util[cpu], threads++;
-        }
-        char cpus[16], t[16] = "-";
-        if (first == last) sprintf(cpus, "%d", first);
-        else sprintf(cpus, "%d-%d", first, last);
-        if (temp >= 0) sprintf(t, "%d C", temp);
-        printf("%-6s %-8s %-6u %-6d %-6s %d%%\n", cores[i].name, cpus, cpuApic[first], mhz, t, threads ? u / threads : 0);
-    }
-    return 0;
-}
-
-static int cmdWhea(int minutes) {
-    wheaPoll(nowFiletime() - (ULONG64)(minutes ? minutes : 60) * 600000000ull);
-    int perCore[MAX_CPU] = {0}, other = 0;
-    for (int i = 0; i < wheaCount; i++) {
-        const Whea *w = &whea[i];
-        SYSTEMTIME st;
-        FILETIME utc = {(DWORD)w->time, (DWORD)(w->time >> 32)}, local;
-        FileTimeToLocalFileTime(&utc, &local);
-        FileTimeToSystemTime(&local, &st);
-        if (w->core >= 0) perCore[w->core]++;
-        else other++;
-        if (wheaCount - i <= 40)
-            printf("%04d-%02d-%02d %02d:%02d:%02d  event %-3d %-4s %-8s bank %d  status %016llX\n", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, w->id,
-                   w->core < 0 ? "-" : cores[w->core].name, wheaKind(w), w->bank, w->core < 0 ? 0 : w->status);
-    }
-    printf("\n%d record%s in the last %d minutes.", wheaCount, wheaCount == 1 ? "" : "s", minutes ? minutes : 60);
-    for (int i = 0; i < coreCount; i++)
-        if (perCore[i]) printf("  %s: %d", cores[i].name, perCore[i]);
-    if (other) printf("  not a CPU core: %d", other);
-    printf("\n");
-    return 0;
-}
-
-static int cmdWatch(int minutes) {
-    Snapshot s;
-    int util[MAX_CPU] = {0};
-    ULONG64 started = nowFiletime();
-    char time8[16];
-    DWORD t0 = GetTickCount();
-    utilRead(util);
-    printf("time,water,pkg_w,pkg_c,errors,hottest,hottest_c,p_mhz_max\n");
-    while (!stopRequested && (!minutes || GetTickCount() - t0 < (DWORD)minutes * 60000)) {
-        Sleep(EVERY_MS);
-        utilRead(util);
-        sensorsRead(&s);
-        wheaPoll(started);
-        int hot = -1, mhz = 0;
-        for (int cpu = 0; cpu < cpuCount; cpu++) {
-            if (s.cpu[cpu].temp >= 0 && (hot < 0 || s.cpu[cpu].temp > s.cpu[hot].temp)) hot = cpu;
-            if (s.cpu[cpu].mhz > mhz) mhz = s.cpu[cpu].mhz;
-        }
-        clock8(time8);
-        printf("%s,%.1f,%d,%d,%d,%s,%d,%d\n", time8, coolantRead(), s.pkgWatts, s.pkgTemp, wheaCount, hot < 0 ? "" : cores[cpuCore[hot]].name, hot < 0 ? -1 : s.cpu[hot].temp, mhz);
-        fflush(stdout);
-    }
-    return 0;
-}
+// ---- The helper task ----
 
 // The helper task: on demand only, highest privileges, runs `shakedown --helper` without a window.
 static int cmdInstall(BOOL remove) {
@@ -967,13 +946,14 @@ static int cmdInstall(BOOL remove) {
         sei.fMask = SEE_MASK_NOCLOSEPROCESS;
         sei.lpVerb = L"runas", sei.lpFile = exe, sei.lpParameters = remove ? L"uninstall" : L"install", sei.nShow = SW_HIDE;
         if (!ShellExecuteExW(&sei)) {
-            fprintf(stderr, "Admin rights were refused.\n");
+            fail("Admin rights were refused.");
             return 1;
         }
         WaitForSingleObject(sei.hProcess, 30000);
         CloseHandle(sei.hProcess);
-        printf(taskExists() != remove ? (remove ? "Helper removed.\n" : "Helper installed. Temperatures and throttling are now read without a prompt.\n") : "That did not work.\n");
-        return taskExists() != remove ? 0 : 1;
+        BOOL done = taskExists() != remove;
+        say(done ? (remove ? "Helper removed.\n" : "Helper installed. Temperatures and throttling are now read without a prompt.\n") : "That did not work.\n");
+        return done ? 0 : 1;
     }
     if (remove) {
         wcscpy(cmd, L"schtasks.exe /Delete /TN " TASK_NAME L" /F");
@@ -991,7 +971,12 @@ static int cmdInstall(BOOL remove) {
              L"<Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><AllowStartOnDemand>true</AllowStartOnDemand>"
              L"<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>"
              L"<ExecutionTimeLimit>PT12H</ExecutionTimeLimit><Priority>5</Priority></Settings>"
+#ifdef SHAKEDOWN_WINDOW
+             L"<Actions Context=\"Author\"><Exec><Command>\"%ls\"</Command><Arguments>--helper</Arguments></Exec></Actions></Task>",
+#else
+             // A console program started by a task would flash a window; conhost --headless runs it without one.
              L"<Actions Context=\"Author\"><Exec><Command>conhost.exe</Command><Arguments>--headless \"%ls\" --helper</Arguments></Exec></Actions></Task>",
+#endif
              user, exe);
     GetTempPathW(MAX_PATH, file);
     wcscat(file, L"shakedown-task.xml");
@@ -1005,68 +990,10 @@ static int cmdInstall(BOOL remove) {
     return code;
 }
 
-static int usage(void) {
-    printf("Shakedown " VERSION ": run a real all-core load and see which CPU cores fail.\n\n"
-           "  shakedown run   [--minutes N] [--exclude 2,4] [--soak C] [--note \"text\"] [--label name]\n"
-           "                  One run of the load in shakedown.ini. --minutes 0 (default) is a single pass.\n"
-           "  shakedown rank  [--minutes N] [--exclude 2,4] [--max-runs 6]\n"
-           "                  Repeat, holding out each core the error log names, until the load passes.\n"
-           "  shakedown sensors          Cores, clocks, temperatures right now.\n"
-           "  shakedown whea  [--minutes N]   Hardware errors Windows logged, by core.\n"
-           "  shakedown watch [--minutes N]   Log sensors and errors without running a load.\n"
-           "  shakedown install | uninstall   The helper that reads temperatures without an admin prompt.\n\n"
-           "Each run writes runs\\<time>-<label>.csv and .txt and adds a line to ledger.csv, beside shakedown.exe.\n");
-    return 0;
-}
-
-int main(int argc, char **argv) {
-    Options o = {0};
-    const char *cmd = argc > 1 ? argv[1] : "help";
-    setvbuf(stdout, NULL, _IONBF, 0);
-    paths();
-    if (!strcmp(cmd, "--helper")) {
-        if (!topology()) return 2;
-        DWORD n = sizeof(DWORD), mhz = 0;
-        RegGetValueW(HKEY_LOCAL_MACHINE, L"HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0", L"~MHz", RRF_RT_REG_DWORD, NULL, &mhz, &n);
-        baseMhz = (int)mhz;
-        return helperMain();
-    }
-    if (!strcmp(cmd, "install")) return cmdInstall(FALSE);
-    if (!strcmp(cmd, "uninstall")) return cmdInstall(TRUE);
-    if (strcmp(cmd, "run") && strcmp(cmd, "rank") && strcmp(cmd, "sensors") && strcmp(cmd, "whea") && strcmp(cmd, "watch")) return usage();
-    if (!topology()) {
-        fprintf(stderr, "Could not read the CPU layout.\n");
-        return 2;
-    }
-    for (int i = 2; i < argc; i++) {
-        const char *value = i + 1 < argc ? argv[i + 1] : "";
-        if (!strcmp(argv[i], "--minutes")) o.minutes = atoi(value), i++;
-        else if (!strcmp(argv[i], "--exclude")) o.exclude = parseCores(value), i++;
-        else if (!strcmp(argv[i], "--soak")) o.soak = atoi(value), i++;
-        else if (!strcmp(argv[i], "--max-runs")) o.maxRuns = atoi(value), i++;
-        else if (!strcmp(argv[i], "--note")) snprintf(o.note, sizeof(o.note), "%s", value), i++;
-        else if (!strcmp(argv[i], "--label")) snprintf(o.label, sizeof(o.label), "%s", value), i++;
-        else {
-            fprintf(stderr, "Unknown option %s\n", argv[i]);
-            return 2;
-        }
-    }
-    for (char *c = o.label; *c; c++)
-        if (!((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9') || *c == '-')) *c = '-';
-    for (char *c = o.note; *c; c++)
-        if (*c == '"' || *c == '\n') *c = ' ';
-    if (!strcmp(cmd, "whea")) return cmdWhea(o.minutes);
-    SetConsoleCtrlHandler(onCtrl, TRUE);
-    sensorsOpen();
-    int code;
-    if (!strcmp(cmd, "sensors")) code = cmdSensors();
-    else if (!strcmp(cmd, "watch")) code = cmdWatch(o.minutes);
-    else if (!strcmp(cmd, "rank")) code = cmdRank(&o);
-    else {
-        Result r;
-        char name[96];
-        code = !runOnce(&o, &r, name) ? 2 : r.pass ? 0 : 1;
-    }
-    if (aliveEvent) CloseHandle(aliveEvent);
-    return code;
+static int helperEntry(void) {
+    DWORD n = sizeof(DWORD), mhz = 0;
+    if (!topology()) return 2;
+    RegGetValueW(HKEY_LOCAL_MACHINE, L"HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0", L"~MHz", RRF_RT_REG_DWORD, NULL, &mhz, &n);
+    baseMhz = (int)mhz;
+    return helperMain();
 }

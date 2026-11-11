@@ -4,6 +4,8 @@ Runs a real all-core load on your PC and tells you which CPU cores failed, when,
 
 For overclockers who want to know which cores hold a setting and which do not, without guessing from a crash.
 
+<img src="docs/window.png" width="640" alt="Shakedown during a run">
+
 ## What it does
 
 - Starts a load you choose (Cinebench by default) and watches it.
@@ -13,29 +15,40 @@ For overclockers who want to know which cores hold a setting and which do not, w
 - Ends with a verdict: pass or fail, why, and a line per core.
 - Keeps every run in a ledger, so you can see which setting bought what.
 
-Nothing is installed and nothing keeps running. It changes no setting on your PC.
+Nothing is installed and nothing keeps running: it does not start with Windows, and its tray icon is only there while the window is open. It changes no setting on your PC.
 
 ## Finding the weak cores
 
-`shakedown rank` runs the load, takes the cores the error log named, and runs it again with those cores held out. It repeats until the load passes. The order in which cores drop out is the ranking, weakest first, and you have it before you change anything in the BIOS.
+**Rank cores** (`shakedown-cli rank`) runs the load, takes the cores the error log named, and runs it again with those cores held out. It repeats until the load passes. The order in which cores drop out is the ranking, weakest first, and you have it before you change anything in the BIOS.
 
 A held-out core is kept idle with a job affinity limit, which the load cannot undo.
 
 ## Use
 
-1. Put `shakedown.exe` in a folder. Copy `shakedown.example.ini` there as `shakedown.ini` and set the path to your load.
-2. Optional, for temperatures and throttling: install [PawnIO](https://pawnio.eu), put `IntelMSR.bin` (from [PawnIO.Modules](https://github.com/namazso/PawnIO.Modules/releases)) beside the exe, and run `shakedown install` once. It asks for admin rights one time.
-3. Run it from a terminal:
+1. Put `shakedown.exe` and `shakedown-cli.exe` in a folder. Copy `shakedown.example.ini` there as `shakedown.ini` and set the path to your load.
+2. Optional, for temperatures and throttling: install [PawnIO](https://pawnio.eu) and put `IntelMSR.bin` (from [PawnIO.Modules](https://github.com/namazso/PawnIO.Modules/releases)) beside the programs. The window then offers **Install the helper**, which asks for admin rights one time.
+3. Open `shakedown.exe`.
+
+In the window:
+
+- **Single pass**, **10 minutes** and **Rank cores** start a run. **Stop** ends it.
+- Every core has a line (or a cell, for efficiency cores) with its clock, temperature and load. A core turns red the moment Windows logs an error for it.
+- Click a core to hold it out of the next run.
+- Type what you are testing (for example `P0 P1 59x, rest 58x`) and it is kept with the result.
+- With the window minimised, the tray icon shows progress on hover and tells you when a run ends.
+
+The same from a terminal, for scripts:
 
 ```
-shakedown run                      one pass of the load
-shakedown run --minutes 10         a 10 minute run
-shakedown run --exclude 2,4        the same with P-cores 2 and 4 held out
-shakedown run --soak 40            wait until the water is 40 C, then start
-shakedown rank                     find the failing cores, weakest first
-shakedown sensors                  cores, clocks and temperatures right now
-shakedown whea --minutes 120       hardware errors Windows logged, by core
-shakedown watch                    log sensors and errors with no load
+shakedown-cli run                      one pass of the load
+shakedown-cli run --minutes 10         a 10 minute run
+shakedown-cli run --exclude 2,4        the same with P-cores 2 and 4 held out
+shakedown-cli run --soak 40            wait until the water is 40 C, then start
+shakedown-cli rank --minutes 10        find the failing cores, weakest first
+shakedown-cli sensors                  cores, clocks and temperatures right now
+shakedown-cli whea --minutes 120       hardware errors Windows logged, by core
+shakedown-cli watch                    log sensors and errors with no load
+shakedown-cli install                  the helper, without the window
 ```
 
 `--note "P0 P1 59x, rest 58x"` writes what you are testing into the ledger.
@@ -53,14 +66,14 @@ All of these:
 
 ## Sensors
 
-| | Without the helper | With `shakedown install` |
+| | Without the helper | With the helper |
 |---|---|---|
 | Errors by core | Yes | Yes |
 | Core clock | From Windows counters | From the CPU (APERF/MPERF) |
 | Core and package temperature | No | Yes |
 | Throttling, package power | No | Yes |
 
-The helper is an on-demand task that runs `shakedown.exe` with admin rights while a run is going. It only reads sensors and writes them to a file. It takes no commands and starts nothing, and the load itself always runs with normal rights. `shakedown uninstall` removes it.
+The helper is an on-demand task that runs Shakedown with admin rights while the window is open or a run is going. It only reads sensors and writes them to a file. It takes no commands and starts nothing, and the load itself always runs with normal rights. `shakedown-cli uninstall` removes it.
 
 Intel CPUs only for temperatures. Error matching works on any CPU that reports an APIC ID in its error records.
 
@@ -69,14 +82,14 @@ Intel CPUs only for temperatures. Error matching works on any CPU that reports a
 - It cannot change clocks or voltages. You change those in the BIOS and run it again.
 - A core that is held out makes no heat, so the other cores run a little cooler than in a full run. Confirm a ranking with a full run.
 - If the PC freezes, the run ends with it. The log on disk is complete up to the last 2 seconds; pipe the output to another machine if you want it to survive.
-- An error with no core named (or a crash with nothing logged) stops `rank`, because there is nothing to hold out.
+- An error with no core named (or a crash with nothing logged) stops a ranking, because there is nothing to hold out.
 
 ## Build
 
-Needs [zig](https://ziglang.org).
+Needs [zig](https://ziglang.org) and Python 3 with Pillow (for the icon).
 
 ```sh
-./build.sh            # build/shakedown.exe
+./build.sh            # build/shakedown.exe and build/shakedown-cli.exe
 ```
 
 ## License

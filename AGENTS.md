@@ -4,7 +4,7 @@ Guide for coding agents working on this repo. Humans: see README.md.
 
 ## Rules
 
-- One console program, Win32 C, system DLLs only. Nothing resident, nothing installed except the optional on-demand helper task.
+- Win32 C, system DLLs only. Nothing resident, nothing installed except the optional on-demand helper task. No autostart: the window and its tray icon exist only while it is open.
 - It never changes a hardware setting. Reads only: MSRs through PawnIO's signed IntelMSR module, the event log, performance counters.
 - The elevated helper reads sensors and writes a file. It must never take commands, run a program or read a path from a place a normal process can write, because that would be a way around UAC. The load always runs unelevated.
 - Docs: plain, short. Never use em dashes or en dashes in any file.
@@ -13,9 +13,13 @@ Guide for coding agents working on this repo. Humans: see README.md.
 
 | Path | Purpose |
 |---|---|
-| `src/shakedown.c` | Everything: topology, sensors, error log, the run, the verdict, commands |
+| `src/engine.c` | Topology, sensors, error log, the run, the verdict, ranking, the helper. `#include`d by the two programs |
+| `src/window.c` | `shakedown.exe`: the window and tray icon (Direct2D on the CPU, same drawing set as Blackout's panel) |
+| `src/cli.c` | `shakedown-cli.exe`: the same engine from a terminal |
+| `tools/make_icon.py` | Draws `shakedown.ico` (Pillow) |
+| `docs/window.png` | README image, made with `shakedown.exe --shot running x2 out=<file.bmp>` |
 | `shakedown.example.ini` | Config template |
-| `build.sh` | zig cross-build to `build/shakedown.exe` |
+| `build.sh` | zig cross-build to `build/` |
 
 ## How it works
 
@@ -26,6 +30,15 @@ Guide for coding agents working on this repo. Humans: see README.md.
 - **Helper lifetime:** the run holds the named event `Local\ShakedownAlive`; the helper exits 15 s after it can no longer open it, or after 12 h. The task runs `conhost.exe --headless shakedown.exe --helper` so no window appears.
 - **Load:** started suspended, put in a job (kill on close, affinity limit when cores are held out), then resumed. Its output goes to `runs\<name>.load.txt`. A newer file matching `[load] crashfile` means it crashed: the job is ended 2 s later.
 - **Verdict:** see README, "What counts as a pass". A sample counts as "under load" when the load is alive and its cores average 70% busy or more.
+
+## The window
+
+- One worker thread owns the engine (sensors, error log, runs). Each sample it copies a `Live` struct under a lock and posts `WM_LIVE`; at the end of a run `WM_DONE`. The window thread only draws and never touches hardware. Between runs the worker samples every 2 s so the table stays live.
+- Drawing: an `ID2D1DCRenderTarget` (software) into a DIB, then `BitBlt`. A frame is drawn per sample or mouse change, nothing in between.
+- Fixed size, 880 x 616 at 100%. Left: P-cores as rows, E-cores as a grid. Right: readings, test, result, history (last three lines of `ledger.csv`).
+- Clicking a core toggles it in `heldOut`; after a ranking the cores that had to be held out stay marked.
+- Closing the window stops a running load (it asks first), then the worker, then the process. The helper notices within 15 s and exits.
+- `shakedown.exe --shot <idle|running|fail|pass|rank|nohelper> [light] [x2] out=<file.bmp>` draws one state with made-up data: no window, no hardware. Review these after any change to the picture.
 
 ## Check
 
