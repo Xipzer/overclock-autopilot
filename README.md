@@ -4,7 +4,10 @@ Runs a real all-core load on your PC and tells you which CPU cores failed, when,
 
 For overclockers who want to know which cores hold a setting and which do not, without guessing from a crash.
 
-<img src="docs/window.png" width="640" alt="Shakedown during a run">
+<p>
+<img src="docs/panel.png" width="300" alt="Shakedown during a run">
+<img src="docs/panel-result.png" width="300" alt="Shakedown after a failed run">
+</p>
 
 ## What it does
 
@@ -15,27 +18,29 @@ For overclockers who want to know which cores hold a setting and which do not, w
 - Ends with a verdict: pass or fail, why, and a line per core.
 - Keeps every run in a ledger, so you can see which setting bought what.
 
-Nothing is installed and nothing keeps running: it does not start with Windows, and its tray icon is only there while the window is open. It changes no setting on your PC.
+It does not start with Windows. You start it when you are tuning, it sits in the tray for that session, and it is gone when you exit it. While its panel is closed and no run is going it does nothing at all. It changes no setting on your PC.
 
 ## Finding the weak cores
 
-**Rank cores** (`shakedown-cli rank`) runs the load, takes the cores the error log named, and runs it again with those cores held out. It repeats until the load passes. The order in which cores drop out is the ranking, weakest first, and you have it before you change anything in the BIOS.
+**Rank** (`shakedown-cli rank`) runs the load, takes the cores the error log named, and runs it again with those cores held out. It repeats until the load passes. The order in which cores drop out is the ranking, weakest first, and you have it before you change anything in the BIOS.
 
 A held-out core is kept idle with a job affinity limit, which the load cannot undo.
 
 ## Use
 
 1. Put `shakedown.exe` and `shakedown-cli.exe` in a folder. Copy `shakedown.example.ini` there as `shakedown.ini` and set the path to your load.
-2. Optional, for temperatures and throttling: install [PawnIO](https://pawnio.eu) and put `IntelMSR.bin` (from [PawnIO.Modules](https://github.com/namazso/PawnIO.Modules/releases)) beside the programs. The window then offers **Install the helper**, which asks for admin rights one time.
-3. Open `shakedown.exe`.
+2. Optional, for temperatures and throttling: install [PawnIO](https://pawnio.eu) and put `IntelMSR.bin` (from [PawnIO.Modules](https://github.com/namazso/PawnIO.Modules/releases)) beside the programs. The panel then offers **Install the helper**, which asks for admin rights one time.
+3. Start `shakedown.exe`. Its panel opens above the tray, and its icon stays in the tray until you exit.
 
-In the window:
+In the panel:
 
-- **Single pass**, **10 minutes** and **Rank cores** start a run. **Stop** ends it.
+- **1 pass**, **10 min** and **Rank** start a run. **Stop** ends it.
 - Every core has a line (or a cell, for efficiency cores) with its clock, temperature and load. A core turns red the moment Windows logs an error for it.
 - Click a core to hold it out of the next run.
 - Type what you are testing (for example `P0 P1 59x, rest 58x`) and it is kept with the result.
-- With the window minimised, the tray icon shows progress on hover and tells you when a run ends.
+- The panel closes when you click elsewhere, like the system tray menus. The **pin** keeps it open. Click the tray icon to bring it back.
+- A run keeps going with the panel closed. The tray icon shows progress on hover and tells you when the run ends.
+- The **x** exits Shakedown.
 
 The same from a terminal, for scripts:
 
@@ -73,7 +78,7 @@ All of these:
 | Core and package temperature | No | Yes |
 | Throttling, package power | No | Yes |
 
-The helper is an on-demand task that runs Shakedown with admin rights while the window is open or a run is going. It only reads sensors and writes them to a file. It takes no commands and starts nothing, and the load itself always runs with normal rights. `shakedown-cli uninstall` removes it.
+The helper is an on-demand task that runs Shakedown with admin rights while the panel is open or a run is going. It only reads sensors and writes them to a file. It takes no commands and starts nothing, and the load itself always runs with normal rights. `shakedown-cli uninstall` removes it.
 
 Intel CPUs only for temperatures. Error matching works on any CPU that reports an APIC ID in its error records.
 

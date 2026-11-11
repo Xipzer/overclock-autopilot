@@ -20,7 +20,7 @@
 #include <wchar.h>
 #include <stdarg.h>
 
-#define VERSION    "0.2.0"
+#define VERSION    "0.3.0"
 #define MAX_CPU    64
 #define MAX_WHEA   1024
 #define TASK_NAME  L"Shakedown"
@@ -359,6 +359,7 @@ static HANDLE aliveEvent;
 static void sensorsOpen(void) {
     DWORD n = sizeof(DWORD), mhz = 0;
     Snapshot s;
+    if (source != SRC_NONE) return;
     RegGetValueW(HKEY_LOCAL_MACHINE, L"HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0", L"~MHz", RRF_RT_REG_DWORD, NULL, &mhz, &n);
     baseMhz = (int)mhz;
     if (isElevated() && msrOpen()) {
@@ -368,7 +369,7 @@ static void sensorsOpen(void) {
     }
     if (taskExists()) {
         WCHAR cmd[128] = L"schtasks.exe /Run /TN " TASK_NAME;
-        aliveEvent = CreateEventW(NULL, TRUE, FALSE, ALIVE_NAME);
+        if (!aliveEvent) aliveEvent = CreateEventW(NULL, TRUE, FALSE, ALIVE_NAME);
         if (helperRead(&s) || runHidden(cmd, 10000) == 0) {
             for (int i = 0; i < 40 && source == SRC_NONE; i++) {
                 if (helperRead(&s)) source = SRC_HELPER;
@@ -382,6 +383,14 @@ static void sensorsOpen(void) {
         PdhCollectQueryData(pdhQuery);
         source = SRC_COUNTERS;
     }
+}
+
+// Lets go of the sensors while nobody is looking, so the helper stops. sensorsOpen() brings them back.
+static void sensorsClose(void) {
+    if (source == SRC_DIRECT || source == SRC_NONE) return;
+    if (aliveEvent) CloseHandle(aliveEvent), aliveEvent = NULL;
+    if (pdhQuery) PdhCloseQuery(pdhQuery), pdhQuery = NULL;
+    source = SRC_NONE;
 }
 
 static void sensorsRead(Snapshot *s) {
