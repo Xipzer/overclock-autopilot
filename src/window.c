@@ -26,6 +26,7 @@
 #define ACCENT      0xE5484D
 #define WARN        0xF0A35B
 #define GOOD        0x3FB950
+#define COOL        0x4C9AFF
 #define WM_LIVE     (WM_APP + 1)
 #define WM_DONE     (WM_APP + 2)
 #define WM_TRAY     (WM_APP + 3)
@@ -177,10 +178,23 @@ static void number(int v, LPWSTR out) {
     else wsprintfW(out, L"%d", v);
 }
 
+// A colour for a temperature: blue when cool, through green and amber, to red near the thermal limit.
 static UINT heat(int temp, int limit) {
+    static const struct { float at; UINT rgb; } stop[] = {{0, COOL}, {0.35f, GOOD}, {0.62f, WARN}, {0.85f, ACCENT}, {1, ACCENT}};
     if (limit <= 0) limit = 100;
-    return temp >= limit - 10 ? ACCENT : temp >= limit - 25 ? warn() : dim();
+    float t = (float)(temp - 25) / (float)(limit - 25);
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    int i = 0;
+    while (i < 3 && t > stop[i + 1].at) i++;
+    float f = (t - stop[i].at) / (stop[i + 1].at - stop[i].at);
+    UINT out = 0;
+    for (int shift = 16; shift >= 0; shift -= 8) {
+        int a = (stop[i].rgb >> shift) & 255, b = (stop[i + 1].rgb >> shift) & 255;
+        out |= (UINT)(a + (b - a) * f + 0.5f) << shift;
+    }
+    return out;
 }
+static BOOL hot(int temp, int limit) { return temp >= (limit > 0 ? limit : 100) - 25; }
 
 static const LiveCore *shown(int i, int *errors, int *first) {
     // Errors stay on screen after a run, until the next one starts.
@@ -192,12 +206,14 @@ static const LiveCore *shown(int i, int *errors, int *first) {
 
 static BOOL isHeld(int i) { return ((running ? view.held : heldOut) >> i & 1) != 0; }
 
-static void button(int id, LPCWSTR label, float x, float y, float w, BOOL enabled, BOOL strong) {
+// Start buttons carry the cool colour, Stop the accent. A disabled button is grey.
+static void button(int id, LPCWSTR label, float x, float y, float w, BOOL enabled, BOOL stop) {
     D2D1_RECT_F r = rc(x, y, w, 30);
     if (enabled) hit[id] = r;
-    if (strong && enabled) fillRound(r, 6, ACCENT, hover == id ? 0.85f : 1);
-    else fillRound(r, 6, tone(), !enabled ? 0.03f : hover == id ? 0.14f : 0.08f);
-    text(label, F_BOLD, rc(x, y + 6, w, 20), strong && enabled ? 0xFFFFFF : ink(), enabled ? 1 : 0.35f, DWRITE_TEXT_ALIGNMENT_CENTER);
+    if (!enabled) fillRound(r, 6, tone(), 0.03f);
+    else if (stop) fillRound(r, 6, ACCENT, hover == id ? 0.85f : 1);
+    else fillRound(r, 6, COOL, hover == id ? 0.38f : light ? 0.20f : 0.24f), strokeRound(r, 6, COOL, 0.45f, 1);
+    text(label, F_BOLD, rc(x, y + 6, w, 20), stop && enabled ? 0xFFFFFF : ink(), enabled ? 1 : 0.35f, DWRITE_TEXT_ALIGNMENT_CENTER);
 }
 
 static void reading(LPCWSTR value, LPCWSTR label, float x, float y, float w, UINT color) {
@@ -283,7 +299,7 @@ static void paintAll(void) {
             lstrcpyW(s, L"Ready");
         }
         float tw = measure(s, F_SMALL);
-        if (running) dot(right - tw - 9, y + 16, 3.5f, ACCENT, 1);
+        dot(right - tw - 9, y + 16, 3.5f, running ? ACCENT : haveResult ? color : good(), 1);
         text(s, F_SMALL, rc(right - tw - 1, y + 8, tw + 4, 18), color, 1, DWRITE_TEXT_ALIGNMENT_LEADING);
         // Pin: keeps the panel open when you click elsewhere.
         hit[H_PIN] = rc(x + w - 58, y + 2, 28, 28);
@@ -313,15 +329,15 @@ static void paintAll(void) {
         card(x, y, w, 52);
         if (view.coolant >= 0) wsprintfW(s, L"%d.%d\x00B0", (int)view.coolant, (int)(view.coolant * 10 + 0.5) % 10);
         else lstrcpyW(s, L"-");
-        reading(s, L"Water", x, y, cw, ink());
+        reading(s, L"Water", x, y, cw, view.coolant >= 0 ? COOL : ink());
         if (view.pkgWatts > 0) wsprintfW(s, L"%d W", view.pkgWatts);
         else lstrcpyW(s, L"-");
-        reading(s, L"Package", x + cw, y, cw, ink());
+        reading(s, L"Package", x + cw, y, cw, view.pkgWatts > 0 ? warn() : ink());
         if (hottest >= 0) wsprintfW(s, L"%d\x00B0", view.core[hottest].temp), wsprintfW(t, L"Hottest: %S", cores[hottest].name);
         else lstrcpyW(s, L"-"), lstrcpyW(t, L"Hottest core");
-        reading(s, t, x + 2 * cw, y, cw, hottest >= 0 && heat(view.core[hottest].temp, view.tjmax) != dim() ? heat(view.core[hottest].temp, view.tjmax) : ink());
+        reading(s, t, x + 2 * cw, y, cw, hottest >= 0 ? heat(view.core[hottest].temp, view.tjmax) : ink());
         wsprintfW(s, L"%d", total);
-        reading(s, total == 1 ? L"Error" : L"Errors", x + 3 * cw, y, cw, total ? ACCENT : ink());
+        reading(s, total == 1 ? L"Error" : L"Errors", x + 3 * cw, y, cw, total ? ACCENT : good());
         y += 52 + 10;
     }
 
@@ -385,14 +401,16 @@ static void paintAll(void) {
             D2D1_RECT_F cell = rc(cx, cy, cw, ch);
             UINT color = ink();
             if (!running) hit[H_CORE + i] = cell;
-            fillRound(cell, 5, errors ? ACCENT : tone(), errors ? 0.30f : hover == H_CORE + i ? 0.12f : 0.06f);
+            if (errors) fillRound(cell, 5, ACCENT, 0.30f);
+            else if (c->temp >= 0 && !held) fillRound(cell, 5, heat(c->temp, view.tjmax), hover == H_CORE + i ? 0.34f : 0.20f);
+            else fillRound(cell, 5, tone(), hover == H_CORE + i ? 0.12f : 0.06f);
             wsprintfW(s, L"%S", cores[i].name);
             text(s, F_TINY, rc(cx, cy + 2, cw, 13), dim(), a, DWRITE_TEXT_ALIGNMENT_CENTER);
             if (errors) wsprintfW(s, L"%d err", errors);
             else if (held) lstrcpyW(s, L"out");
             else if (c->temp >= 0) {
                 wsprintfW(s, L"%d\x00B0", c->temp);
-                if (heat(c->temp, view.tjmax) != dim()) color = heat(c->temp, view.tjmax);
+                if (hot(c->temp, view.tjmax)) color = heat(c->temp, view.tjmax);
             } else if (c->mhz) number(c->mhz, s);
             else lstrcpyW(s, L"-");
             text(s, F_SMALL, rc(cx, cy + 13, cw, 15), color, a, DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -436,8 +454,20 @@ static void paintAll(void) {
             hit[H_INSTALL] = rc(ix + lw + 4, hy - 2, measure(link, F_TINY) + 6, 18);
             text(link, F_TINY, rc(ix + lw + 7, hy, 220, 14), ACCENT, hover == H_INSTALL ? 0.8f : 1, DWRITE_TEXT_ALIGNMENT_LEADING);
         } else {
-            LPCWSTR hint = running ? L"A crash closes the load by itself. Stop ends it now." : L"Click a core to hold it out. Rank repeats a 10 minute run.";
-            text(hint, F_TINY, rc(ix, hy, iw, 14), dim(), 1, DWRITE_TEXT_ALIGNMENT_LEADING);
+            // Says what the thing under the mouse does.
+            LPCWSTR hint = running ? L"A crash closes the load by itself. Stop ends it now." : L"Hover anything to see what it does.";
+            if (hover == H_PASS) hint = L"Run the load once, start to finish. The quick check.";
+            else if (hover == H_TEN) hint = L"Run the load for 10 minutes. The full test.";
+            else if (hover == H_RANK) hint = L"10 minute runs, holding out each core that fails, until it passes.";
+            else if (hover == H_STOP) hint = L"End the run now.";
+            else if (hover == H_NOTE) hint = L"Saved with the result, so you know which settings it was.";
+            else if (hover == H_PIN) hint = pinned ? L"Pinned: stays open. Click to let it close again." : L"Keep this panel open when you click elsewhere.";
+            else if (hover == H_EXIT) hint = L"Exit Shakedown. It is not running after this.";
+            else if (hover >= H_CORE) {
+                wsprintfW(s, isHeld(hover - H_CORE) ? L"%S is held out. Click to put it back in the next run." : L"Click to hold %S out of the next run: it stays idle.", cores[hover - H_CORE].name);
+                hint = s;
+            }
+            text(hint, F_TINY, rc(ix, hy, iw, 14), hover ? ink() : dim(), hover ? 0.9f : 1, DWRITE_TEXT_ALIGNMENT_LEADING);
         }
         y += 112 + 10;
     }

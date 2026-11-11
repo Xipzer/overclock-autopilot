@@ -35,6 +35,7 @@ A held-out core is kept idle with a job affinity limit, which the load cannot un
 In the panel:
 
 - **1 pass**, **10 min** and **Rank** start a run. **Stop** ends it.
+- Hover anything and the line under the buttons says what it does.
 - Every core has a line (or a cell, for efficiency cores) with its clock, temperature and load. A core turns red the moment Windows logs an error for it.
 - Click a core to hold it out of the next run.
 - Type what you are testing (for example `P0 P1 59x, rest 58x`) and it is kept with the result.
