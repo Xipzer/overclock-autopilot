@@ -10,5 +10,5 @@ mkdir -p build
 python3 tools/make_icon.py build/shakedown.ico
 cp src/shakedown.rc build/
 "$ZIG" cc $FLAGS src/cli.c -o build/shakedown-cli.exe $LIBS
-"$ZIG" cc $FLAGS -municode -Wl,--subsystem,windows src/window.c build/shakedown.rc -o build/shakedown.exe $LIBS -lgdi32 -ldwmapi
+"$ZIG" cc $FLAGS -municode -Wl,--subsystem,windows src/window.c build/shakedown.rc -o build/shakedown.exe $LIBS -lgdi32 -ldwmapi -lwinmm
 ls -l build/shakedown.exe build/shakedown-cli.exe
