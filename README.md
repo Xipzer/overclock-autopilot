@@ -18,7 +18,7 @@ For overclockers who want to know which cores hold a setting and which do not, w
 - Ends with a verdict: pass or fail, why, and a line per core.
 - Keeps every run in a ledger, so you can see which setting bought what.
 
-It does not start with Windows. You start it when you are tuning, it sits in the tray for that session, and it is gone when you exit it. While its panel is closed and no run is going it does nothing at all. It changes no setting on your PC.
+It can start with Windows (`shakedown.exe --tray` puts only the icon in the tray) or by hand. While its panel is closed and no run is going it does nothing at all. It changes no setting on your PC.
 
 ## Finding the weak cores
 

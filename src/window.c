@@ -1239,12 +1239,13 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     int px = GetSystemMetricsForDpi(SM_CXSMICON, GetDpiForSystem());
     nid.hIcon = LoadImageW(inst, MAKEINTRESOURCEW(1), IMAGE_ICON, px, px, 0);
     lstrcpyW(nid.szTip, L"Shakedown \x00B7 click to open");
-    Shell_NotifyIconW(NIM_ADD, &nid);
+    // At logon the taskbar may not be ready yet; try again until it takes the icon.
+    for (int i = 0; i < 30 && !Shell_NotifyIconW(NIM_ADD, &nid); i++) Sleep(2000);
     Shell_NotifyIconW(NIM_SETVERSION, &nid);
 
     onLive = publish; // the engine's samples during a run reach the panel
     workerThread = CreateThread(NULL, 0, worker, NULL, 0, NULL);
-    panelShow(); // starting it means you want to see it
+    if (!wcsstr(cmd, L"--tray")) panelShow(); // started by hand: show it. --tray (at logon): icon only
     MSG m;
     while (GetMessageW(&m, NULL, 0, 0) > 0) {
         TranslateMessage(&m);
