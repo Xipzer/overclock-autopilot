@@ -41,7 +41,8 @@ In the panel:
 - Type what you are testing (for example `P0 P1 59x, rest 58x`) and it is kept with the result.
 - The panel closes when you click elsewhere, like the system tray menus. The **pin** keeps it open. Click the tray icon to bring it back.
 - A run keeps going with the panel closed. The tray icon shows progress on hover and tells you when the run ends.
-- The **x** exits Shakedown.
+- **GPU heat** loads the graphics card to warm a shared water loop, for testing the CPU under hot water. It is a switch: on until you turn it off. It asks first if the card is already busy, and switches itself off at the water limit.
+- The **x** closes the panel. To exit Shakedown, right-click the tray icon.
 
 The same from a terminal, for scripts:
 
@@ -87,6 +88,7 @@ Intel CPUs only for temperatures. Error matching works on any CPU that reports a
 
 - It cannot change clocks or voltages. You change those in the BIOS and run it again.
 - A core that is held out makes no heat, so the other cores run a little cooler than in a full run. Confirm a ranking with a full run.
+- GPU power and temperature are read on NVIDIA cards only. The GPU heat itself works on any Direct3D 11 card.
 - If the PC freezes, the run ends with it. The log on disk is complete up to the last 2 seconds; pipe the output to another machine if you want it to survive.
 - An error with no core named (or a crash with nothing logged) stops a ranking, because there is nothing to hold out.
 

@@ -15,6 +15,7 @@ Guide for coding agents working on this repo. Humans: see README.md.
 |---|---|
 | `src/engine.c` | Topology, sensors, error log, the run, the verdict, ranking, the helper. `#include`d by the two programs |
 | `src/window.c` | `shakedown.exe`: the tray icon and popup panel (Direct2D on the CPU, same drawing set and docking as Blackout's panel) |
+| `src/heat.c` | The built-in GPU load (`shakedown.exe --heat`) |
 | `src/cli.c` | `shakedown-cli.exe`: the same engine from a terminal |
 | `tools/make_icon.py` | Draws `shakedown.ico` (Pillow) |
 | `docs/panel*.png` | README images, made with `shakedown.exe --shot` |
@@ -40,8 +41,10 @@ Guide for coding agents working on this repo. Humans: see README.md.
 - Drawing: an `ID2D1DCRenderTarget` (software, premultiplied alpha) into a DIB, handed over with `UpdateLayeredWindow`. A frame is drawn per sample or mouse change, nothing in between. Never while the panel is hidden.
 - 372 wide, height from the core counts (`height()`). Top to bottom: header (state, pin, exit), four readings, P-cores as rows, E-cores as a grid, the test card, the result card (or the last two ledger lines when there is no result yet). On a small or heavily scaled screen the whole panel is scaled down to fit.
 - Colour: `heat()` maps a temperature to blue, green, amber, red (red from 85% of the way to the thermal limit) for bars, efficiency-core cells and the hottest reading. Start buttons are blue, Stop is red, a clean error count is green. The hint line under the buttons says what the thing under the mouse does; add a line there for any new control.
+- **GPU heat** (`src/heat.c`): `shakedown.exe --heat` is a separate process that draws a heavy pixel shader off-screen on the card with the most memory (Direct3D 11, loaded with `LoadLibrary` so the tray process never loads the graphics driver). It sleeps while the card works, so it costs almost no CPU. The panel starts it in a kill-on-close job and holds the event `Local\\ShakedownHeat`; the load exits 3 s after the event is gone. `[heat] command=` replaces it with the user's own program. `heatToggle()` asks before starting when the card already draws 150 W or more, and `WM_LIVE` switches it off at `[limits] coolant`. While the heat is on the worker keeps sampling with the panel closed, because of that limit. GPU watts and temperature come from `nvml.dll` (`gpuRead`, NVIDIA only, read only).
+- The x closes the panel. Exit is in the tray icon's right-click menu (with open/close and the GPU heat switch).
 - Clicking a core toggles it in `heldOut`; after a ranking the cores that had to be held out stay marked.
-- Exit stops a running load (it asks first), then the worker, then the process. The helper notices within 15 s and exits.
+- Exit stops the GPU heat and a running load (it asks first), then the worker, then the process. The helper notices within 15 s and exits.
 - `shakedown.exe --shot <idle|running|fail|pass|rank|nohelper|first> [light] [pinned] [x2] out=<file.bmp>` draws one state with made-up data: no window, no hardware. The bitmap has premultiplied alpha. Review these after any change to the picture; `docs/panel*.png` are made from them.
 
 ## Check

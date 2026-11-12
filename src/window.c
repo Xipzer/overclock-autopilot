@@ -12,6 +12,7 @@
 #define SHAKEDOWN_WINDOW
 #define COBJMACROS
 #include "engine.c"
+#include "heat.c"
 #include <d2d1.h>
 #include <dwrite.h>
 #include <dwmapi.h>
@@ -31,7 +32,7 @@
 #define WM_DONE     (WM_APP + 2)
 #define WM_TRAY     (WM_APP + 3)
 
-enum { H_NONE, H_PIN, H_EXIT, H_PASS, H_TEN, H_RANK, H_STOP, H_NOTE, H_INSTALL, H_CORE, H_COUNT = H_CORE + MAX_CPU };
+enum { H_NONE, H_PIN, H_EXIT, H_PASS, H_TEN, H_RANK, H_STOP, H_NOTE, H_INSTALL, H_HEAT, H_CORE, H_COUNT = H_CORE + MAX_CPU };
 enum { F_BRAND, F_ROW, F_SMALL, F_BOLD, F_TINY, F_COUNT };
 enum { K_NONE, K_PASS, K_TEN, K_RANK, K_SENSORS };
 
@@ -79,6 +80,55 @@ static Options sharedOptions, pendingOptions;
 static char sharedName[96], sharedRank[1024], sharedProblem[200];
 static volatile LONG pendingKind, quitting, watching;
 static HANDLE wake, workerThread;
+// The GPU load that warms the loop: a child process in its own job, switched by hand.
+static HANDLE heatJob, heatProcess, heatEvent;
+static BOOL fakeHeat; // --shot
+
+// ---- GPU heat ----
+
+static BOOL heatOn(void) {
+    if (fakeHeat) return TRUE;
+    if (heatProcess && WaitForSingleObject(heatProcess, 0) == WAIT_OBJECT_0) {
+        CloseHandle(heatProcess), CloseHandle(heatJob), CloseHandle(heatEvent);
+        heatProcess = heatJob = heatEvent = NULL; // it ended by itself
+    }
+    return heatProcess != NULL;
+}
+
+static void heatStop(void) {
+    if (!heatProcess) return;
+    TerminateJobObject(heatJob, 0);
+    CloseHandle(heatProcess), CloseHandle(heatJob), CloseHandle(heatEvent);
+    heatProcess = heatJob = heatEvent = NULL;
+}
+
+// Starts the load in [heat] command= of shakedown.ini, or the built-in one (this program with --heat).
+static BOOL heatStart(void) {
+    WCHAR command[1024], exe[MAX_PATH];
+    STARTUPINFOW si = {sizeof(si)};
+    PROCESS_INFORMATION pi;
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limit = {0};
+    if (heatOn()) return TRUE;
+    setting(L"heat", L"command", L"", command, 1024);
+    if (!command[0]) {
+        GetModuleFileNameW(NULL, exe, MAX_PATH);
+        swprintf(command, 1024, L"\"%ls\" --heat", exe);
+    }
+    heatEvent = CreateEventW(NULL, TRUE, FALSE, HEAT_NAME);
+    heatJob = CreateJobObjectW(NULL, NULL);
+    limit.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    SetInformationJobObject(heatJob, JobObjectExtendedLimitInformation, &limit, sizeof(limit));
+    if (!CreateProcessW(NULL, command, NULL, NULL, FALSE, CREATE_SUSPENDED | CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS, NULL, NULL, &si, &pi)) {
+        CloseHandle(heatJob), CloseHandle(heatEvent);
+        heatJob = heatEvent = NULL;
+        return FALSE;
+    }
+    AssignProcessToJobObject(heatJob, pi.hProcess);
+    ResumeThread(pi.hThread);
+    CloseHandle(pi.hThread);
+    heatProcess = pi.hProcess;
+    return TRUE;
+}
 
 // ---- Drawing primitives (the same set as Blackout's panel) ----
 
@@ -170,7 +220,7 @@ static int eRows(void) { return (coreCount - pCount + 7) / 8; }
 static float height(void) {
     float h = PAD + 32 + 8 + 52 + 10 + (20 + pCount * PROW + 4) + 8;
     if (eRows()) h += eRows() * 30 + (eRows() - 1) * 4 + 16 + 10;
-    return h + 112 + 10 + 76 + PAD;
+    return h + 148 + 10 + 76 + PAD;
 }
 
 static void number(int v, LPWSTR out) {
@@ -423,7 +473,7 @@ static void paintAll(void) {
     {
         float ix = x + INSET, iw = w - 2 * INSET, bw = (iw - 3 * 6) / 4;
         BOOL full = source == SRC_DIRECT || source == SRC_HELPER;
-        card(x, y, w, 112);
+        card(x, y, w, 148);
         D2D1_RECT_F box = rc(ix, y + INSET, iw, 30);
         if (!running) hit[H_NOTE] = box;
         fillRound(box, 6, tone(), noteFocus ? 0.09f : 0.05f);
@@ -439,8 +489,24 @@ static void paintAll(void) {
         button(H_TEN, L"10 min", ix + (bw + 6), by, bw, !running, FALSE);
         button(H_RANK, L"Rank", ix + 2 * (bw + 6), by, bw, !running, FALSE);
         button(H_STOP, L"Stop", ix + 3 * (bw + 6), by, bw, running, TRUE);
-        float hy = by + 30 + 8;
-        if (running && view.wanted) {
+        // GPU heat: a switch, with what the graphics card is doing beside it.
+        {
+            float ty = by + 30 + 6;
+            BOOL on = heatOn();
+            hit[H_HEAT] = rc(ix - 4, ty, iw + 8, 30);
+            if (hover == H_HEAT) fillRound(hit[H_HEAT], 6, tone(), 0.05f);
+            text(L"GPU heat", F_ROW, rc(ix, ty + 6, 70, 20), ink(), 1, DWRITE_TEXT_ALIGNMENT_LEADING);
+            s[0] = 0;
+            if (view.gpuWatts >= 0) wsprintfW(s, L"%d W", view.gpuWatts);
+            if (view.gpuTemp >= 0) wsprintfW(s + lstrlenW(s), L"%s%d\x00B0", s[0] ? L" \x00B7 " : L"", view.gpuTemp);
+            if (!s[0]) lstrcpyW(s, on ? L"on" : L"off");
+            text(s, F_SMALL, rc(ix + 70, ty + 7, 140, 18), on ? warn() : dim(), 1, DWRITE_TEXT_ALIGNMENT_LEADING);
+            D2D1_RECT_F sw = rc(ix + iw - 40, ty + 5, 40, 20);
+            if (on) fillRound(sw, 10, WARN, hover == H_HEAT ? 0.85f : 1), dot(sw.left + 30, sw.top + 10, 6, 0xFFFFFF, 1);
+            else fillRound(sw, 10, tone(), hover == H_HEAT ? 0.10f : 0.04f), strokeRound(sw, 10, dim(), 0.9f, 1), dot(sw.left + 10, sw.top + 10, 5, dim(), 1);
+        }
+        float hy = by + 30 + 6 + 30 + 8;
+        if (running && view.wanted && !hover) {
             float part = (float)view.loadSeconds / view.wanted;
             fillRound(rc(ix, hy + 5, iw, 4), 2, tone(), 0.08f);
             fillRound(rc(ix, hy + 5, iw * (part > 1 ? 1 : part), 4), 2, ACCENT, 1);
@@ -462,14 +528,15 @@ static void paintAll(void) {
             else if (hover == H_STOP) hint = L"End the run now.";
             else if (hover == H_NOTE) hint = L"Saved with the result, so you know which settings it was.";
             else if (hover == H_PIN) hint = pinned ? L"Pinned: stays open. Click to let it close again." : L"Keep this panel open when you click elsewhere.";
-            else if (hover == H_EXIT) hint = L"Exit Shakedown. It is not running after this.";
+            else if (hover == H_EXIT) hint = L"Close this panel. To exit, right-click the tray icon.";
+            else if (hover == H_HEAT) hint = heatOn() ? L"The graphics card is warming the water. Click to stop." : L"Load the graphics card to warm the water. Stays on until you stop it.";
             else if (hover >= H_CORE) {
                 wsprintfW(s, isHeld(hover - H_CORE) ? L"%S is held out. Click to put it back in the next run." : L"Click to hold %S out of the next run: it stays idle.", cores[hover - H_CORE].name);
                 hint = s;
             }
             text(hint, F_TINY, rc(ix, hy, iw, 14), hover ? ink() : dim(), hover ? 0.9f : 1, DWRITE_TEXT_ALIGNMENT_LEADING);
         }
-        y += 112 + 10;
+        y += 148 + 10;
     }
 
     // The result of the last run, or the runs before it.
@@ -670,6 +737,7 @@ static void idleSample(int *util) {
     sensorsRead(&s);
     memset(&live, 0, sizeof(live));
     live.phase = PH_IDLE, live.pkgWatts = s.pkgWatts, live.pkgTemp = s.pkgTemp, live.tjmax = s.tjmax, live.coolant = coolantRead();
+    gpuRead(&live.gpuWatts, &live.gpuTemp);
     for (int i = 0; i < coreCount; i++) {
         LiveCore *c = &live.core[i];
         int threads = 0;
@@ -710,7 +778,7 @@ static DWORD WINAPI worker(LPVOID unused) {
             continue;
         }
         if (watching) {
-            // The panel is open: keep its numbers fresh.
+            // The panel is open (or the GPU heat is on, which has a water limit to watch): keep the numbers fresh.
             sensorsOpen();
             idleSample(util);
             WaitForSingleObject(wake, EVERY_MS);
@@ -763,7 +831,7 @@ static void panelHide(void) {
     ShowWindow(panel, SW_HIDE);
     closedAt = GetTickCount();
     hover = H_NONE, noteFocus = FALSE;
-    InterlockedExchange(&watching, 0);
+    InterlockedExchange(&watching, heatOn() ? 1 : 0);
     SetEvent(wake);
     tip();
 }
@@ -781,6 +849,26 @@ static void quit(void) {
     modal = FALSE;
 }
 
+// Switches the GPU heat. If the graphics card is already working for something else, ask first: the load would
+// take time away from it.
+static void heatToggle(void) {
+    WCHAR ask[160];
+    if (heatOn()) {
+        heatStop();
+    } else {
+        if (view.gpuWatts >= 150) {
+            wsprintfW(ask, L"The graphics card is already busy (%d W), so something else is using it.\n\nSwitch the GPU heat on anyway? It will slow that work down.", view.gpuWatts);
+            modal = TRUE;
+            int answer = MessageBoxW(isOpen() ? panel : NULL, ask, L"Shakedown", MB_OKCANCEL | MB_ICONQUESTION | MB_DEFBUTTON2 | MB_TOPMOST);
+            modal = FALSE;
+            if (answer != IDOK) return;
+        }
+        if (!heatStart()) lstrcpyA(problem, "The GPU load could not be started.");
+    }
+    InterlockedExchange(&watching, isOpen() || heatOn() ? 1 : 0);
+    SetEvent(wake);
+}
+
 static void click(int h) {
     noteFocus = h == H_NOTE;
     if (h == H_PASS) start(K_PASS);
@@ -789,8 +877,10 @@ static void click(int h) {
     else if (h == H_STOP) InterlockedExchange(&stopRequested, 1);
     else if (h == H_PIN) pinned = !pinned;
     else if (h == H_EXIT) {
-        quit();
+        panelHide();
         return;
+    } else if (h == H_HEAT) {
+        heatToggle();
     } else if (h == H_INSTALL) {
         modal = TRUE;
         if (cmdInstall(FALSE) == 0) InterlockedExchange(&pendingKind, K_SENSORS), SetEvent(wake);
@@ -956,6 +1046,15 @@ static LRESULT CALLBACK mainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         EnterCriticalSection(&lock);
         view = sharedLive;
         LeaveCriticalSection(&lock);
+        {
+            int limit = GetPrivateProfileIntW(L"limits", L"coolant", 45, iniPath);
+            if (heatOn() && limit > 0 && view.coolant >= limit) {
+                heatStop();
+                snprintf(problem, sizeof(problem), "GPU heat switched off: the water reached %.1f C.", view.coolant);
+            }
+        }
+        // Nothing left to watch: let the worker rest.
+        if (!isOpen() && !heatOn() && !running && watching) InterlockedExchange(&watching, 0), SetEvent(wake);
         tip();
         redraw();
         return 0;
@@ -983,13 +1082,36 @@ static LRESULT CALLBACK mainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_TRAY:
-        if (LOWORD(lp) == NIN_SELECT || LOWORD(lp) == NIN_KEYSELECT || LOWORD(lp) == WM_CONTEXTMENU) {
+        if (LOWORD(lp) == NIN_SELECT || LOWORD(lp) == NIN_KEYSELECT) {
             // A tray click on an open, unpinned panel first deactivates (closes) it; don't reopen on the same click.
             if (isOpen()) panelHide();
             else if (GetTickCount() - closedAt > 300) panelShow();
+        } else if (LOWORD(lp) == WM_CONTEXTMENU) {
+            HMENU menu = CreatePopupMenu();
+            POINT at;
+            AppendMenuW(menu, MF_STRING, 1, isOpen() ? L"Close the panel" : L"Open the panel");
+            AppendMenuW(menu, MF_STRING, 2, heatOn() ? L"GPU heat: switch off" : L"GPU heat: switch on");
+            AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+            AppendMenuW(menu, MF_STRING, 3, L"Exit Shakedown");
+            GetCursorPos(&at);
+            SetForegroundWindow(hwnd);
+            modal = TRUE;
+            int pick = TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD, at.x, at.y, 0, hwnd, NULL);
+            modal = FALSE;
+            DestroyMenu(menu);
+            if (pick == 1) {
+                if (isOpen()) panelHide();
+                else panelShow();
+            } else if (pick == 2) {
+                heatToggle();
+                redraw();
+            } else if (pick == 3) {
+                quit();
+            }
         }
         return 0;
     case WM_DESTROY:
+        heatStop();
         InterlockedExchange(&stopRequested, 1);
         InterlockedExchange(&quitting, 1);
         SetEvent(wake);
@@ -1007,7 +1129,7 @@ static LRESULT CALLBACK mainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 // ---- Developer mode: draw one state to a .bmp with made-up data, no window, no hardware ----
-//   shakedown.exe --shot <idle|running|fail|pass|rank|nohelper|first> [light] [pinned] [x2] out=<file.bmp>
+//   shakedown.exe --shot <idle|running|fail|pass|rank|nohelper|first> [light] [pinned] [heat] [x2] out=<file.bmp>
 // The bitmap is 32-bit with premultiplied alpha, so the rounded corner is in it.
 
 static int shot(LPCWSTR cmd) {
@@ -1018,6 +1140,8 @@ static int shot(LPCWSTR cmd) {
     if (!out) return 2;
     light = wcsstr(cmd, L" light") != NULL;
     pinned = wcsstr(cmd, L" pinned") != NULL;
+    fakeHeat = wcsstr(cmd, L" heat") != NULL;
+    view.gpuWatts = fakeHeat ? 548 : 31, view.gpuTemp = fakeHeat ? 58 : 34;
     scale = wcsstr(cmd, L" x2") ? 2 : 1;
     coreCount = 24, pCount = 8, cpuCount = 32;
     for (int i = 0; i < 24; i++) cores[i].perf = i < 8, sprintf(cores[i].name, i < 8 ? "P%d" : "E%d", i < 8 ? i : i - 8);
@@ -1079,6 +1203,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     quiet = TRUE;
     paths();
     if (wcsstr(cmd, L"--helper")) return helperEntry();
+    if (wcsstr(cmd, L"--heat")) return heatMain();
     if (!wcscmp(cmd, L"install")) return cmdInstall(FALSE);
     if (!wcscmp(cmd, L"uninstall")) return cmdInstall(TRUE);
     if (wcsstr(cmd, L"--shot")) return shot(cmd);

@@ -20,7 +20,7 @@
 #include <wchar.h>
 #include <stdarg.h>
 
-#define VERSION    "0.3.0"
+#define VERSION    "0.4.0"
 #define MAX_CPU    64
 #define MAX_WHEA   1024
 #define TASK_NAME  L"Shakedown"
@@ -37,7 +37,7 @@
 enum { PH_IDLE, PH_BEFORE, PH_START, PH_LOAD, PH_AFTER };
 typedef struct { int mhz, temp, util, flags, errors, firstError; } LiveCore;
 typedef struct {
-    int phase, loadSeconds, wanted, busy, pkgWatts, pkgTemp, tjmax, errors, round;
+    int phase, loadSeconds, wanted, busy, pkgWatts, pkgTemp, tjmax, errors, round, gpuWatts, gpuTemp;
     double coolant;
     ULONG64 held;
     LiveCore core[64];
@@ -417,6 +417,28 @@ static void utilRead(int *util) {
     }
 }
 
+// Graphics card power and temperature, for runs that warm a shared loop with it. NVIDIA only (nvml.dll, which
+// comes with the driver); anything else reads as unknown. -1 = unknown.
+static void gpuRead(int *watts, int *temp) {
+    static int state; // 0 not tried, 1 working, -1 unavailable
+    static void *device;
+    static int(__cdecl * power)(void *, unsigned *);
+    static int(__cdecl * temperature)(void *, int, unsigned *);
+    unsigned v;
+    *watts = *temp = -1;
+    if (!state) {
+        HMODULE lib = LoadLibraryW(L"nvml.dll");
+        int(__cdecl * init)(void) = lib ? (void *)GetProcAddress(lib, "nvmlInit_v2") : NULL;
+        int(__cdecl * byIndex)(unsigned, void **) = lib ? (void *)GetProcAddress(lib, "nvmlDeviceGetHandleByIndex_v2") : NULL;
+        power = lib ? (void *)GetProcAddress(lib, "nvmlDeviceGetPowerUsage") : NULL;
+        temperature = lib ? (void *)GetProcAddress(lib, "nvmlDeviceGetTemperature") : NULL;
+        state = init && byIndex && power && temperature && init() == 0 && byIndex(0, &device) == 0 ? 1 : -1;
+    }
+    if (state != 1) return;
+    if (power(device, &v) == 0) *watts = (int)(v / 1000);
+    if (temperature(device, 0, &v) == 0) *temp = (int)v;
+}
+
 // A temperature some other program publishes in the registry (Blackout's water temperature, for one).
 static double coolantRead(void) {
     static WCHAR key[256], value[64];
@@ -515,7 +537,7 @@ typedef struct {
     BOOL pass;
     char reason[96], score[32];
     int seconds, wanted, errors, pkgTempMax, loaded;
-    double coolantStart, coolantMax, wattSum;
+    double coolantStart, coolantMax, wattSum, gpuSum;
     ULONG64 failed; // cores named by the error log
     CoreStat core[MAX_CPU];
 } Result;
@@ -646,7 +668,7 @@ static BOOL runOnce(const Options *o, Result *r, char *name) {
         }
     }
 
-    int n = snprintf(line, sizeof(line), "time,elapsed,phase,util,coolant,pkg_w,pkg_c,errors");
+    int n = snprintf(line, sizeof(line), "time,elapsed,phase,util,coolant,pkg_w,pkg_c,gpu_w,errors");
     for (int i = 0; i < coreCount; i++) n += snprintf(line + n, sizeof(line) - n, ",%s_mhz,%s_c,%s_util", cores[i].name, cores[i].name, cores[i].name);
     snprintf(line + n, sizeof(line) - n, "\n");
     both(csv, line);
@@ -679,6 +701,8 @@ static BOOL runOnce(const Options *o, Result *r, char *name) {
         sensorsRead(&s);
         wheaPoll(started);
         double coolant = coolantRead();
+        int gpuWatts, gpuTemp;
+        gpuRead(&gpuWatts, &gpuTemp);
         if (coolant > r->coolantMax) r->coolantMax = coolant;
 
         // Start the load after a few idle samples.
@@ -713,9 +737,10 @@ static BOOL runOnce(const Options *o, Result *r, char *name) {
         n += coolant < 0 ? snprintf(line + n, sizeof(line) - n, ",") : snprintf(line + n, sizeof(line) - n, "%.1f,", coolant);
         n += snprintf(line + n, sizeof(line) - n, "%d,", s.pkgWatts);
         n += s.pkgTemp < 0 ? snprintf(line + n, sizeof(line) - n, ",") : snprintf(line + n, sizeof(line) - n, "%d,", s.pkgTemp);
+        n += gpuWatts < 0 ? snprintf(line + n, sizeof(line) - n, ",") : snprintf(line + n, sizeof(line) - n, "%d,", gpuWatts);
         n += snprintf(line + n, sizeof(line) - n, "%d", wheaCount);
         if (loaded) {
-            r->loaded++, r->wattSum += s.pkgWatts;
+            r->loaded++, r->wattSum += s.pkgWatts, r->gpuSum += gpuWatts > 0 ? gpuWatts : 0;
             if (s.pkgTemp > r->pkgTempMax) r->pkgTempMax = s.pkgTemp;
         }
         for (int i = 0; i < coreCount; i++) {
@@ -750,7 +775,7 @@ static BOOL runOnce(const Options *o, Result *r, char *name) {
             live.phase = !begun ? PH_BEFORE : running ? (loaded ? PH_LOAD : PH_START) : PH_AFTER;
             live.loadSeconds = !begun ? 0 : running ? (int)((GetTickCount() - (DWORD)loadTick) / 1000) : r->seconds;
             live.wanted = r->wanted, live.busy = busy, live.pkgWatts = s.pkgWatts, live.pkgTemp = s.pkgTemp, live.tjmax = s.tjmax;
-            live.coolant = coolant, live.held = o->exclude, live.round = o->round;
+            live.coolant = coolant, live.held = o->exclude, live.round = o->round, live.gpuWatts = gpuWatts, live.gpuTemp = gpuTemp;
             for (int i = 0; i < coreCount; i++) {
                 LiveCore *lc = &live.core[i];
                 lc->temp = -1, lc->firstError = -1;
@@ -846,11 +871,11 @@ static BOOL runOnce(const Options *o, Result *r, char *name) {
         coreList(o->exclude, excluded), coreList(r->failed, failed);
         for (int i = 0; i < coreCount; i++)
             if (r->core[i].tempMax >= 0 && (hottest < 0 || r->core[i].tempMax > r->core[hottest].tempMax)) hottest = i;
-        if (fresh) fprintf(ledger, "run,note,minutes,excluded,result,reason,seconds,score,errors,failed_cores,hottest_core,hottest_c,water_start,water_max,package_w\n");
+        if (fresh) fprintf(ledger, "run,note,minutes,excluded,result,reason,seconds,score,errors,failed_cores,hottest_core,hottest_c,water_start,water_max,package_w,gpu_w\n");
         fprintf(ledger, "%s,\"%s\",%d,%s,%s,\"%s\",%d,%s,%d,%s,%s,", name, o->note, o->minutes, excluded, r->pass ? "PASS" : "FAIL", r->reason, r->seconds, r->score, r->errors, failed,
                 hottest < 0 ? "" : cores[hottest].name);
         if (hottest >= 0) fprintf(ledger, "%d", r->core[hottest].tempMax);
-        fprintf(ledger, ",%.1f,%.1f,%d\n", r->coolantStart, r->coolantMax, r->loaded ? (int)(r->wattSum / r->loaded) : 0);
+        fprintf(ledger, ",%.1f,%.1f,%d,%d\n", r->coolantStart, r->coolantMax, r->loaded ? (int)(r->wattSum / r->loaded) : 0, r->loaded ? (int)(r->gpuSum / r->loaded) : 0);
         fclose(ledger);
     }
     return TRUE;
@@ -877,6 +902,7 @@ static void verdict(const Options *o, const Result *r, const char *name, FILE *o
     fprintf(out, "\n");
     if (r->coolantStart >= 0) fprintf(out, "# Water: %.1f C at start, %.1f C at most\n", r->coolantStart, r->coolantMax);
     if (r->pkgTempMax >= 0) fprintf(out, "# Package: %d W on average, %d C at most\n", r->loaded ? (int)(r->wattSum / r->loaded) : 0, r->pkgTempMax);
+    if (r->loaded && r->gpuSum > 0) fprintf(out, "# Graphics card: %d W on average\n", (int)(r->gpuSum / r->loaded));
     fprintf(out, "# Sensors: %s\n#\n", sourceName[source]);
     fprintf(out, "  Core    MHz avg / min   Hottest  Busy   Errors\n");
     // Performance cores one by one. Efficiency cores as one line unless one of them stands out.
