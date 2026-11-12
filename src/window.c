@@ -1242,6 +1242,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     Shell_NotifyIconW(NIM_ADD, &nid);
     Shell_NotifyIconW(NIM_SETVERSION, &nid);
 
+    onLive = publish; // the engine's samples during a run reach the panel
     workerThread = CreateThread(NULL, 0, worker, NULL, 0, NULL);
     panelShow(); // starting it means you want to see it
     MSG m;
