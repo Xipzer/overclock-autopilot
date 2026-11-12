@@ -833,15 +833,24 @@ static BOOL runOnce(const Options *o, Result *r, char *name) {
     if (prefix[0]) {
         swprintf(path, MAX_PATH, L"%lsruns\\%hs.load.txt", exeDir, name);
         FILE *f = _wfopen(path, L"rb");
-        char text[8192], want[64], *at, *last = NULL;
+        static char text[65536];
+        char want[64], *at, *last = NULL;
         if (f) {
+            // The score comes at the end of what the load prints, so read the end.
+            fseek(f, 0, SEEK_END);
+            long size = ftell(f);
+            fseek(f, size > (long)sizeof(text) - 1 ? size - ((long)sizeof(text) - 1) : 0, SEEK_SET);
             size_t got = fread(text, 1, sizeof(text) - 1, f);
             text[got] = 0;
             fclose(f);
             snprintf(want, sizeof(want), "%ls", prefix);
-            for (at = text; (at = strstr(at, want)); at += strlen(want)) last = at + strlen(want);
+            // The last place the prefix starts a line and a number follows it.
+            for (at = text; (at = strstr(at, want)); at += strlen(want)) {
+                char *after = at + strlen(want);
+                while (*after == ' ' || *after == ':' || *after == '=') after++;
+                if ((at == text || at[-1] == '\n') && *after >= '0' && *after <= '9') last = after;
+            }
             if (last) {
-                while (*last == ' ' || *last == ':' || *last == '=') last++;
                 int k = 0;
                 while (k < 30 && ((last[k] >= '0' && last[k] <= '9') || last[k] == '.' || last[k] == ',')) r->score[k] = last[k], k++;
             }
