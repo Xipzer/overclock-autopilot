@@ -19,6 +19,8 @@ Guide for coding agents working on this repo. Humans: see README.md.
 | `src/cli.c` | `shakedown-cli.exe`: the same engine from a terminal |
 | `tools/make_icon.py` | Draws `shakedown.ico` (Pillow) |
 | `docs/panel*.png` | README images, made with `shakedown.exe --shot` |
+| `docs/ROADMAP.md` | The plan for the tuning loop and its milestones |
+| `docs/PLUGINS.md` | Design of the backend interface for platform editions (not built yet) |
 | `shakedown.example.ini` | Config template |
 | `build.sh` | zig cross-build to `build/` |
 
