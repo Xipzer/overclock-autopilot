@@ -1,6 +1,12 @@
-# Shakedown
+# OC Autopilot
 
-Runs a real all-core load on your PC and tells you which CPU cores failed, when, and how hot they were.
+Automatic CPU and DDR5 RAM overclocking, undervolting and stability testing for Windows, built for Intel Raptor Lake.
+
+> **Status: early.** Today it is the stability-testing core (formerly called Shakedown, and its programs are still
+> `shakedown.exe` and `shakedown-cli.exe`): it runs a real all-core load and tells you which CPU cores failed, when, and
+> how hot they were. The automatic tuning workflow (memory timings, voltage floors, per-core ratios, temperature
+> guards, the full test ladder) is being built from a finished manual tuning campaign documented in
+> [raptor-lake-field-notes](https://github.com/Xipzer/raptor-lake-field-notes).
 
 For overclockers who want to know which cores hold a setting and which do not, without guessing from a crash.
 
