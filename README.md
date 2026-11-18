@@ -151,6 +151,30 @@ Intel CPUs only for temperatures. Error matching works on any CPU that reports a
 - If the PC freezes, the run ends with it. The log on disk is complete up to the last 2 seconds; pipe the output to another machine if you want it to survive.
 - An error with no core named (or a crash with nothing logged) stops a ranking, because there is nothing to hold out.
 
+## Field lessons: quirks and remedies
+
+What the manual campaign behind this tool taught us about CPU stability testing on Windows. Most of it is built into the tester; the rest is advice for your own scripts.
+The measurements are in [raptor-lake-field-notes](https://github.com/Xipzer/raptor-lake-field-notes), and the full index is its [quirks.md](https://github.com/Xipzer/raptor-lake-field-notes/blob/master/quirks.md).
+
+| Quirk | What we saw | Remedy | Built in? |
+|---|---|---|---|
+| Cinebench resets its own affinity | `start /affinity` did not hold cores out | A job object with an affinity limit, which the load cannot undo | Yes (held-out cores, Rank) |
+| The Store build of Cinebench cannot be scripted | No command line | Use the standalone build with `g_CinebenchCpuXTest=true g_CinebenchMinimumTestDuration=<s>` | Example ini |
+| A crash leaves a dialog waiting for a click | The next run never starts | Watch the load's crash file and close the load | Yes (`crashfile=`) |
+| Silent crashes | Several fails left no WHEA record at all | Count a crash with nothing logged as a fail | Yes |
+| Errors name the core that saw them | A memory fault was reported "on an E-core" | Rerun in-cache to tell a core fault from a memory fault | Advice |
+| 10 minutes is not 30 | The 10-minute Vcore floor was 30 mV too low | Search with 10 minutes, confirm with 30 minutes, twice | Advice (`--minutes 30`) |
+| A cold loop passes | 59x passed on 18 C water and failed every 10-minute run | Heat the shared loop with the GPU and start warm | Yes (GPU heat, `--soak`) |
+| GPU heat on top of an all-thread memory test | 459 W, a core at 107 C, hard reset | Never stack GPU heat on an all-thread y-cruncher run | Advice |
+| Water runs away | | Stop the load and the GPU heat at a water limit | Yes (`[limits] coolant=`) |
+| GPU heat over someone else's GPU work | Our heat ran over another workload once | Ask first when the card already draws 150 W or more | Yes |
+| An old heater kept running after a swap | Two GPU loads | Check which binary runs after replacing the exe | Advice |
+| Output piped to another machine | A broken pipe ended a 30-minute run 30 s before the end | Write the log locally; mirror it beside the run, never in its pipe | Yes (local CSV every 2 s) |
+| A comma in a run name broke a ledger lookup | A real fail logged with the wrong reason | Run names keep only `A-Z a-z 0-9 -` | Yes |
+| WHEA from short windows | "0 errors" said when 37 had been logged in 30 days | Read the whole log by core before you start (`whea --minutes N`) | Yes |
+| HWiNFO beside a fan controller | Board fans to about 3,000 rpm while HWiNFO starts | Expect it; it changes cooling for the run | Advice |
+| Mailbox voltage on ASRock Fixed mode | Writes change nothing; the VRM holds Vcore | Change Vcore in the BIOS or the board's own tool | Yes (the tester never writes voltage) |
+
 ## Build
 
 Needs [zig](https://ziglang.org) and Python 3 with Pillow (for the icon).
